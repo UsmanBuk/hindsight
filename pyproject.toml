@@ -1,0 +1,10 @@
+[project]
+name = "hindsight"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.4",
+    "sherpa-onnx>=2.0.1",
+    "soundfile>=0.14.0",
+]

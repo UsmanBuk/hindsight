@@ -1,0 +1,13 @@
+# models (downloaded by install.sh)
+models/
+*.onnx
+*.gguf
+# recordings
+*.mp4
+*.mkv
+*.wav
+Meetings/
+# python
+.venv/
+__pycache__/
+*.pyc
