@@ -1,6 +1,8 @@
 """Hindsight: local, offline meeting recorder.
 
-hindsight start | stop | toggle | status | process <dir> | cleanup
+Usage: hindsight start | stop | toggle | status | process <dir> | cleanup
+
+Configure with HINDSIGHT_* environment variables (see README.md).
 """
 from __future__ import annotations
 
@@ -17,19 +19,42 @@ import time
 import traceback
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 ROOT = Path(__file__).resolve().parent
-MODELS = ROOT / "models"
-MEETINGS = Path(os.environ.get("HINDSIGHT_MEETINGS", Path.home() / "Meetings"))
-STATE_DIR = Path.home() / ".local/state/hindsight"
+
+
+def _env(name: str, default: str) -> str:
+    """HINDSIGHT_<name> from the environment, or the default when unset/empty."""
+    return os.environ.get(f"HINDSIGHT_{name}") or default
+
+
+def _xdg(var: str, fallback: str) -> Path:
+    return Path(os.environ.get(var) or Path.home() / fallback)
+
+
+# Configuration: every setting can be overridden with a HINDSIGHT_* environment variable.
+MODELS = Path(_env("MODELS_DIR", str(ROOT / "models"))).expanduser()
+MEETINGS = Path(_env("MEETINGS_DIR", _env("MEETINGS", str(Path.home() / "Meetings")))).expanduser()
+STATE_DIR = Path(_env("STATE_DIR", str(_xdg("XDG_STATE_HOME", ".local/state") / "hindsight"))).expanduser()
 STATE_FILE = STATE_DIR / "current.json"
 LOCK_FILE = STATE_DIR / "lock"
 LOG_FILE = STATE_DIR / "hindsight.log"
 
-OLLAMA_URL = os.environ.get("HINDSIGHT_OLLAMA_URL", "http://127.0.0.1:11434/v1")
-OLLAMA_MODEL = os.environ.get("HINDSIGHT_OLLAMA_MODEL", "gemma4:e4b")
-RETENTION_DAYS = 30
-MAX_W, MAX_H, FPS = 1920, 1080, 15
+OLLAMA_URL = _env("OLLAMA_URL", "http://127.0.0.1:11434/v1").rstrip("/")
+OLLAMA_MODEL = _env("OLLAMA_MODEL", "gemma4:e4b")
+MIC_SOURCE = _env("MIC", "")              # PulseAudio/PipeWire source; empty = system default
+SYSTEM_SOURCE = _env("SYSTEM_AUDIO", "")  # monitor source; empty = default sink's .monitor
+VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")  # auto | h264_nvenc | libx264
+RETENTION_DAYS = int(_env("RETENTION_DAYS", "30"))  # 0 disables video cleanup
+MAX_W = int(_env("MAX_WIDTH", "1920"))
+MAX_H = int(_env("MAX_HEIGHT", "1080"))
+FPS = int(_env("FPS", "15"))
+DIARIZATION_THRESHOLD = float(_env("DIARIZATION_THRESHOLD", "0.75"))
+ASR_THREADS = int(_env("ASR_THREADS", str(min(12, os.cpu_count() or 4))))
 SR = 16000
 
 
@@ -123,7 +148,7 @@ def nvenc_available() -> bool:
 
 
 def video_codec_args() -> list[str]:
-    if nvenc_available():
+    if VIDEO_ENCODER == "h264_nvenc" or (VIDEO_ENCODER == "auto" and nvenc_available()):
         return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
                 "-cq", "32", "-b:v", "0", "-maxrate", "2M", "-bufsize", "4M", "-g", str(FPS * 10)]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-g", str(FPS * 10)]
@@ -145,8 +170,8 @@ def cmd_start() -> int:
         display = os.environ.get("DISPLAY") or ":0"
         w, h = screen_size(display)
         ow, oh = scaled_size(w, h)
-        mic = run(["pactl", "get-default-source"])
-        monitor = run(["pactl", "get-default-sink"]) + ".monitor"
+        mic = MIC_SOURCE or run(["pactl", "get-default-source"])
+        monitor = SYSTEM_SOURCE or run(["pactl", "get-default-sink"]) + ".monitor"
 
         now = dt.datetime.now()
         mdir = MEETINGS / f"{now:%Y-%m-%d_%H%M}_recording"
@@ -186,7 +211,7 @@ def cmd_start() -> int:
             "mic": mic, "monitor": monitor,
         }))
         log(f"recording started pid={proc.pid} dir={mdir} {w}x{h}->{ow}x{oh} "
-            f"nvenc={nvenc_available()} mic={mic} monitor={monitor}")
+            f"encoder={video_codec_args()[1]} mic={mic} monitor={monitor}")
         notify("● Recording started", f"Mic: {mic}\nSystem: {monitor}")
         return 0
 
@@ -239,7 +264,7 @@ def spawn_process(mdir: Path) -> None:
 
 
 def cleanup_old_videos() -> None:
-    if not MEETINGS.exists():
+    if RETENTION_DAYS <= 0 or not MEETINGS.exists():
         return
     cutoff = time.time() - RETENTION_DAYS * 86400
     active = (load_state() or {}).get("dir")
@@ -255,7 +280,7 @@ def cleanup_old_videos() -> None:
 
 # ---------------------------------------------------------------- transcription
 
-def extract_track(video: Path, index: int, dest: Path) -> "np.ndarray":
+def extract_track(video: Path, index: int, dest: Path) -> np.ndarray:
     import numpy as np
     import soundfile as sf
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
@@ -266,7 +291,7 @@ def extract_track(video: Path, index: int, dest: Path) -> "np.ndarray":
     return np.asarray(audio, dtype=np.float32)
 
 
-def vad_segments(audio) -> list[tuple[float, float, "np.ndarray"]]:
+def vad_segments(audio) -> list[tuple[float, float, np.ndarray]]:
     import sherpa_onnx
     cfg = sherpa_onnx.VadModelConfig()
     cfg.silero_vad.model = str(MODELS / "silero_vad.onnx")
@@ -307,7 +332,7 @@ def recognizer():
         _recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
             encoder=str(d / "encoder.int8.onnx"), decoder=str(d / "decoder.int8.onnx"),
             joiner=str(d / "joiner.int8.onnx"), tokens=str(d / "tokens.txt"),
-            model_type="nemo_transducer", num_threads=min(12, os.cpu_count() or 4),
+            model_type="nemo_transducer", num_threads=ASR_THREADS,
         )
     return _recognizer
 
@@ -323,7 +348,7 @@ def transcribe(segs, speaker) -> list[dict]:
             s.accept_waveform(SR, samples)
             streams.append(s)
         rec.decode_streams(streams)
-        for (start, end, _), s in zip(batch, streams):
+        for (start, end, _), s in zip(batch, streams, strict=True):
             text = s.result.text.strip()
             if text:
                 out.append({"start": start, "end": end, "speaker": speaker, "text": text})
@@ -340,7 +365,7 @@ def diarize(audio) -> list[tuple[float, float, int]]:
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
             model=str(MODELS / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
             num_threads=4),
-        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.75),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=DIARIZATION_THRESHOLD),
         min_duration_on=0.3, min_duration_off=0.5,
     )
     if not cfg.validate():

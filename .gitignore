@@ -1,13 +1,42 @@
-# models (downloaded by install.sh)
+# Recordings and meeting output (never commit these)
+Meetings/
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.ogg
+transcript.md
+notes.md
+
+# Models (downloaded by install.sh)
 models/
 *.onnx
 *.gguf
-# recordings
-*.mp4
-*.mkv
-*.wav
-Meetings/
-# python
+*.bin
+*.tar.bz2
+*.part
+
+# Python and tool caches
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.cache/
+*.egg-info/
+build/
+dist/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local config and secrets
+.env
+.env.*
