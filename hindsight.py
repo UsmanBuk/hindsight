@@ -340,7 +340,7 @@ def diarize(audio) -> list[tuple[float, float, int]]:
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
             model=str(MODELS / "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"),
             num_threads=4),
-        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.6),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.75),
         min_duration_on=0.3, min_duration_off=0.5,
     )
     if not cfg.validate():
@@ -495,6 +495,7 @@ def process(mdir: Path) -> Path:
         mkv.unlink()
     if not mp4.exists():
         raise FileNotFoundError(mp4)
+    (mdir / "ffmpeg.log").unlink(missing_ok=True)
     duration = probe_duration(mp4)
     log(f"processing {mdir} ({duration:.0f}s)")
 
